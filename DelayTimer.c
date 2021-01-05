@@ -10,9 +10,11 @@
 #include "driverlib/timer.h"
 #include "driverlib/interrupt.h"
 #include "inc/hw_nvic.h"
+#include "driverlib/gpio.h"
+#include "inc/hw_gpio.h"
 
 static unsigned long milliseconds = 0;
-
+volatile unsigned long coffeeTimer = 0;
 void timerInit(void)
 {
 
@@ -66,6 +68,19 @@ void Timer5IntHandler(void)
     TimerIntClear(TIMER5_BASE, TIMER_TIMA_TIMEOUT);
 
 	milliseconds++;
+	
+	/*if (GPIOPinRead(GPIO_PORTE_BASE,GPIO_PIN_4)) // If coffee maker is on, track time
+	{
+		coffeeTimer = millis();
+	}
+	
+	if (millis()- coffeeTimer > 1800*1000) // Once the coffee timer exceeds 30 minutes, turn off.
+	{ 
+		GPIOPinWrite(GPIO_PORTE_BASE,GPIO_PIN_4,0x00);
+		coffeeTimer = 0; // reset coffee timer
+	}*/
+		
+		
 }
 
 

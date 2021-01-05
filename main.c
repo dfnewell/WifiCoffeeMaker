@@ -10,11 +10,13 @@
 #include <string.h>
 
 #include "inc/tm4c123gh6pm.h"
-
+#include "Hidden.h"
 #include "inc/hw_gpio.h"
 #include "inc/hw_types.h"
 #include "inc/hw_memmap.h"
 #include "inc/hw_ints.h"
+#include "inc/hw_nvic.h"
+
 #include "driverlib/fpu.h"
 #include "driverlib/debug.h"
 #include "driverlib/sysctl.h"
@@ -23,11 +25,11 @@
 #include "driverlib/pwm.h"
 #include "driverlib/timer.h"
 #include "driverlib/adc.h"
+#include "driverlib/uart.h"
+#include "driverlib/interrupt.h"
 
 #include "utils/uartstdio.h"
 #include "utils/cmdline.h"
-#include "driverlib/uart.h"
-#include "driverlib/interrupt.h"
 
 #include "DelayTimer.h"
 
@@ -42,9 +44,22 @@ char *Substring(char *src, char *dst, int start, int stop);
 int SearchIndexOf(char src[], char str[]);
 char* itoa(int i, char b[]);
 void ftoa(float f,char *buf);
+//Globally enable interrupts 
+void IntGlobalEnable(void)
+{
+    __asm(" cpsie i\n");
+}
+
+//Globally disable interrupts 
+void IntGlobalDisable(void)
+{
+    __asm(" cpsid i\n");
+}
+
 
 #define Period  320000 //(16000000/50) 50Hz
 
+// INITIALIZE BOARD COMPONENTS:
 void InitUART(void)
 {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
@@ -68,7 +83,58 @@ void InitESPUART(void)
 	UARTEnable(UART1_BASE);
 
 }
+void InitCoffeeSwitch(void)
+{
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+	GPIOPinTypeGPIOOutput(GPIO_PORTE_BASE,GPIO_PIN_4);
+	GPIOPinWrite(GPIO_PORTE_BASE,GPIO_PIN_4,0x00);
+  GPIO_PORTF_DIR_R &= ~0x10;    // (c) make PF4 in (built-in button)
+  GPIO_PORTF_DEN_R |= 0x10;     //     enable digital I/O on PF4
+  GPIO_PORTF_PUR_R |= 0x10;     //     enable weak pull-up on PF4
+}
 
+
+
+void
+Interrupt_Init(void)
+{
+	NVIC_EN0_R |= 0x40000000;  		// enable interrupt 30 in NVIC (GPIOF)
+	NVIC_PRI7_R &= 0x00E00000; 		// configure GPIOF interrupt priority as 0
+	GPIO_PORTF_IM_R |= 0x10;   		// arm interrupt on PF4
+	GPIO_PORTF_IS_R &= ~0x11;     // PF4 is edge-sensitive
+	GPIO_PORTF_IBE_R &= ~0x11;   	// PF4 single edge trigger 
+	GPIO_PORTF_IEV_R &= ~0x11;  	// PF4 falling edge event
+	IntGlobalEnable();						  // Enable Interrupts
+}
+
+//interrupt handler
+void GPIOPortF_Handler(void){
+	//switch debounce
+	NVIC_EN0_R &= ~0x40000000; 
+	SysCtlDelay(53333);	// Delay for a while
+	NVIC_EN0_R |= 0x40000000; 
+	
+	//SW1 has action
+	if(GPIO_PORTF_RIS_R&0x10)
+	{
+		// acknowledge flag for PF4
+		GPIO_PORTF_ICR_R |= 0x10; 
+		
+		//SW1 is pressed
+		if((GPIO_PORTF_DATA_R&0x10)==0x00) 
+		{
+			UARTprintf("press!");
+			//Toggle power for coffee maker
+			GPIOPinWrite(GPIO_PORTE_BASE,GPIO_PIN_4,~GPIOPinRead(GPIO_PORTE_BASE,GPIO_PIN_4));
+		}
+	}
+	
+}
+
+
+
+//-----------------------------------------------------------------
+// WIFI COMMANDS FOR ESP8266:
 void SendATCommand(char *cmd)
 {
 	while(UARTBusy(UART1_BASE));
@@ -290,9 +356,20 @@ void ProcessCommand(char *CommandText) //This receives incoming TCP commands fro
 	UARTprintf("CMD->%s\n",COMMAND); // Confirms what's received into the terminal (UART0)
 	// Programmed buttons for the Telnet phone app: BTN1 = ActionA; BTN2 = ActionB; BTN3 = ActionC; BTN4 = ActionD
 	if(COMMAND[6] == 'A') 		// Now within here, we set up our functions for turning the thing on, off and making a timer 
-		UARTprintf("ON!\n");		// if we can make it happen
+		{ UARTprintf("ON!\n");  // if we can make it happen
+		  GPIOPinWrite(GPIO_PORTE_BASE,GPIO_PIN_4,GPIO_PIN_4);
+			SendATCommand("AT+CIPSEND=0,16");
+			delay(5);
+			SendATCommand("Coffee Maker On!");
+		}
 	else if(COMMAND[6] == 'B')
-		UARTprintf("OFF!\n");
+	  {
+			UARTprintf("OFF!\n");
+			GPIOPinWrite(GPIO_PORTE_BASE,GPIO_PIN_4,0x00);
+			SendATCommand("AT+CIPSEND=0,17");
+			delay(5);
+			SendATCommand("Coffee Maker Off!");
+		}
 	else if(COMMAND[6] == 'C')
 		UARTprintf("SET TIME!\n");
 	else if(COMMAND[6] == 'D') //This just shows we can send something and have the chip respond
@@ -308,7 +385,6 @@ void QuitProcess(void)
 {
 	process = false;
 }
-
 //------------------------------------------------------------------------------------------------------------------------------------
 
 int main(void)
@@ -326,7 +402,6 @@ int main(void)
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
     GPIOPinTypeGPIOOutput(GPIO_PORTD_BASE, GPIO_PIN_0);
     GPIOPinWrite(GPIO_PORTD_BASE, GPIO_PIN_0, 0x00);
-
     GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, 0x02);
 
     timerInit();
@@ -335,8 +410,9 @@ int main(void)
 
 	InitUART();
 	InitESPUART();
-	
-	
+	InitCoffeeSwitch();
+	Interrupt_Init();
+	IntMasterEnable();
 	
 	UARTprintf("Execute!\n");
 
